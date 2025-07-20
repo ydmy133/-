@@ -1,0 +1,9 @@
+train: ../data/train/images
+val: ../data/valid/images
+train_labels: ../data/train/labels
+val_labels: ../data/valid/labels
+
+nc: 1
+
+names:
+  0: wave
