@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>无人船遥控 · 阶段 1</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="wrap">
+    <h1>无人船本地遥控</h1>
+    <p class="sub">连接后默认急停。测电机请拖 <b>T 滑条</b> 并勾选「摇杆松手保持」。应答必须出现 <code>OK T=...</code>；若一直是 —，看下方收发字节（RX 必须大于 0）。空格 = 急停。</p>
+
+    <div class="panel">
+      <div class="row">
+        <label for="port">串口</label>
+        <select id="port"></select>
+        <button id="refresh" class="ghost" type="button">刷新</button>
+        <button id="connect" class="primary" type="button">连接</button>
+        <span><i id="wsDot" class="dot off"></i><span id="wsLabel">网关未连接</span></span>
+        <span><i id="serDot" class="dot off"></i><span id="serLabel">串口未开</span></span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <button id="estop" class="estop" type="button">急 停</button>
+    </div>
+
+    <div class="panel ctrl">
+      <div>
+        <div class="slider-block">
+          <div class="slider-head">
+            <span>推进 T（定速）</span>
+            <span class="val" id="tVal">0</span>
+          </div>
+          <input id="tRange" type="range" min="-100" max="100" value="0" />
+          <div class="btns">
+            <button type="button" data-axis="T" data-d="-5">−5</button>
+            <button type="button" data-axis="T" data-d="-1">−1</button>
+            <button type="button" data-axis="T" data-d="1">+1</button>
+            <button type="button" data-axis="T" data-d="5">+5</button>
+            <button type="button" id="tZero" class="ghost">T=0</button>
+          </div>
+        </div>
+        <div class="slider-block">
+          <div class="slider-head">
+            <span>转向 Y（差速）</span>
+            <span class="val" id="yVal">0</span>
+          </div>
+          <input id="yRange" type="range" min="-100" max="100" value="0" />
+          <div class="btns">
+            <button type="button" data-axis="Y" data-d="-5">−5</button>
+            <button type="button" data-axis="Y" data-d="-1">−1</button>
+            <button type="button" data-axis="Y" data-d="1">+1</button>
+            <button type="button" data-axis="Y" data-d="5">+5</button>
+            <button type="button" id="yZero" class="ghost">Y=0</button>
+          </div>
+        </div>
+      </div>
+      <div class="pad-wrap">
+        <div class="pad" id="pad" title="上进下退，左右转向">
+          <div class="knob" id="knob"></div>
+        </div>
+        <span class="hint">虚拟摇杆 · 上进下退</span>
+        <label class="hint"><input type="checkbox" id="padHold" checked /> 摇杆松手保持（测电机请勾选）</label>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="hint">最近下发</div>
+      <pre class="ack" id="lastCmd">—</pre>
+      <div class="hint">MCU 应答（文本，不是 JSON。T/Y 是 0.1% 单位：网页 T=1 对应 <code>T=10</code>；急停必须变成 <code>OK T=0 Y=0</code>）</div>
+      <pre class="ack" id="lastAck">—</pre>
+      <div class="hint">串口收发（RX=0 表示 MCU 一个字节都没回来）</div>
+      <pre class="ack" id="serIo">TX 0 / RX 0</pre>
+      <div class="hint" id="log">—</div>
+    </div>
+  </div>
+  <script src="/static/app.js?v=6"></script>
+</body>
+</html>
