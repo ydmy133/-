@@ -20,6 +20,8 @@
 #define CMD_HEARTBEAT   0x00
 #define CMD_SET_SPEED   0x01
 #define CMD_ESTOP       0x02
+/* 速度帧后的 RS485 换向噪声可能拼出假急停，把舵机打回中位。 */
+#define ESTOP_LOCKOUT_MS 500U
 
 extern UART_HandleTypeDef huart2;
 
@@ -29,6 +31,7 @@ static int16_t  tgt_left;
 static int16_t  tgt_right;
 static uint32_t last_keep_ms;
 static uint32_t last_ok_ms;
+static uint32_t last_nonzero_ms;
 static uint8_t  motor_running;
 
 static void led1_set(uint8_t on)
@@ -95,14 +98,20 @@ static void handle_speed_frame(const uint8_t *f, uint8_t total)
         /* 只跟速度帧走。0,0 忽略：噪声/误同步不要把已到位的角度打回中位 */
         if (left != 0 || right != 0) {
           apply_speed(left, right);
+          last_nonzero_ms = last_ok_ms;
         }
       }
       break;
 
     case CMD_ESTOP:
       if (len == 2U) {
+        uint32_t now = HAL_GetTick();
+        /* 刚收到非零速度后的假 0x02（总线尾噪声）直接丢掉 */
+        if (last_nonzero_ms != 0U && (now - last_nonzero_ms) < ESTOP_LOCKOUT_MS) {
+          break;
+        }
         apply_speed(0, 0);
-        last_ok_ms = HAL_GetTick();
+        last_ok_ms = now;
       }
       break;
 
@@ -142,6 +151,11 @@ static void try_parse(void)
     }
 
     handle_speed_frame(&rb[i], total);
+    /* 合法速度帧后丢掉同一次突发里的尾字节，避免被拼成急停回中 */
+    if (rb[i + 3U] == CMD_SET_SPEED) {
+      rb_reset();
+      return;
+    }
     {
       uint8_t used = (uint8_t)(i + total);
       uint8_t remain = (uint8_t)(rb_n - used);
@@ -191,6 +205,7 @@ void D03_RS485_Init(void)
   motor_running = 0;
   last_keep_ms = HAL_GetTick();
   last_ok_ms = 0;
+  last_nonzero_ms = 0;
   rb_reset();
 
   __HAL_UART_ENABLE(&huart2);

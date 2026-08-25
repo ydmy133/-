@@ -5,6 +5,10 @@
 #include <stdio.h>
 
 #define RX_RING_SIZE 256U
+/* 0：单帧 speed 后保持角度，不超时急停。改回 1 即恢复 300ms 掉线保护。 */
+#ifndef COM_CMD_TIMEOUT_EN
+#define COM_CMD_TIMEOUT_EN 0
+#endif
 
 /* ISR 写入、主循环读取。
  * 缓冲区本身也要 volatile，避免主循环把 rx_ring[] 当不变数据优化掉。
@@ -88,7 +92,12 @@ static void apply_cmd(const ComCmd *cmd, uint32_t now)
     send_speed(left, right);
   }
 
-  (void)snprintf(ack, sizeof(ack), "OK T=%d Y=%d L=%d R=%d t=%lu\r\n",
+  (void)snprintf(ack, sizeof(ack),
+#if COM_CMD_TIMEOUT_EN
+                 "OK T=%d Y=%d L=%d R=%d t=%lu\r\n",
+#else
+                 "OK HOLD T=%d Y=%d L=%d R=%d t=%lu\r\n",
+#endif
                  (int)cmd_T, (int)cmd_Y, (int)left, (int)right,
                  (unsigned long)now);
   uart4_puts(ack);
@@ -143,13 +152,15 @@ void ComHost_Init(void)
   ATOMIC_SET_BIT(huart4.Instance->CR1, USART_CR1_RXNEIE | USART_CR1_UE);
   huart4.RxState = HAL_UART_STATE_READY;
   huart4.ErrorCode = HAL_UART_ERROR_NONE;
+#if COM_CMD_TIMEOUT_EN
   uart4_puts("READY\r\n");
+#else
+  uart4_puts("READY HOLD\r\n");
+#endif
 }
 
 void ComHost_Poll(void)
 {
-  uint32_t now = HAL_GetTick();
-
   if (rx_err != 0U) {
     uint16_t w;
     rx_err = 0U;
@@ -168,17 +179,20 @@ void ComHost_Poll(void)
     if (fr == 1) {
       ComCmd cmd;
       if (ComJson_Parse((const char *)framer.buf, &cmd) == 0) {
-        now = HAL_GetTick();
-        apply_cmd(&cmd, now);
+        apply_cmd(&cmd, HAL_GetTick());
       }
       ComJsonFramer_Reset(&framer);
     }
   }
 
-  now = HAL_GetTick();
-  if (ComWatchdog_Poll(&watchdog, now) != 0) {
-    cmd_T = 0;
-    cmd_Y = 0;
-    send_estop();
+#if COM_CMD_TIMEOUT_EN
+  {
+    uint32_t now = HAL_GetTick();
+    if (ComWatchdog_Poll(&watchdog, now) != 0) {
+      cmd_T = 0;
+      cmd_Y = 0;
+      send_estop();
+    }
   }
+#endif
 }
