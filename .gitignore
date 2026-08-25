@@ -1,3 +1,18 @@
 # 不上传的本地文件夹
 资料/
 串口助手/
+
+# 固件宿主测试产物 / Keil 本地缓存
+at-com/host-tests/test_com_proto
+at-com/host-tests/*.exe
+at-com/host-tests/*.obj
+**/MDK-ARM/Objects/
+**/MDK-ARM/Listings/
+**/MDK-ARM/DebugConfig/
+*.o
+*.d
+*.crf
+*.dep
+*.uvguix.*
+*.bak
+*.sfr

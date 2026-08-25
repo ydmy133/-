@@ -420,6 +420,21 @@
               <FilePath>../Core/Src/com_host.c</FilePath>
             </File>
             <File>
+              <FileName>com_proto.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/com_proto.c</FilePath>
+            </File>
+            <File>
+              <FileName>com_host.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>../Core/Inc/com_host.h</FilePath>
+            </File>
+            <File>
+              <FileName>com_proto.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>../Core/Inc/com_proto.h</FilePath>
+            </File>
+            <File>
               <FileName>stm32f4xx_it.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/stm32f4xx_it.c</FilePath>

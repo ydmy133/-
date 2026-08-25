@@ -2,18 +2,8 @@
 /**
   ******************************************************************************
   * @file    dma.c
-  * @brief   This file provides code for the configuration
-  *          of all the requested memory to memory DMA transfers.
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
+  * @brief   DMA 已不再用于 UART4 RX（改为 RXNE + ring buffer）。
+  *          保留空实现，避免 CubeMX 工程组里缺文件。
   ******************************************************************************
   */
 /* USER CODE END Header */
@@ -25,31 +15,11 @@
 
 /* USER CODE END 0 */
 
-/*----------------------------------------------------------------------------*/
-/* Configure DMA                                                              */
-/*----------------------------------------------------------------------------*/
-
-/* USER CODE BEGIN 1 */
-
-/* USER CODE END 1 */
-
-/**
-  * Enable DMA controller clock
-  */
 void MX_DMA_Init(void)
 {
-
-  /* DMA controller clock enable */
-  __HAL_RCC_DMA1_CLK_ENABLE();
-
-  /* DMA interrupt init */
-  /* DMA1_Stream2_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Stream2_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(DMA1_Stream2_IRQn);
-
+  /* UART4 不再使用 DMA，不使能 DMA1 时钟与 DMA1_Stream2 IRQ */
 }
 
 /* USER CODE BEGIN 2 */
 
 /* USER CODE END 2 */
-
