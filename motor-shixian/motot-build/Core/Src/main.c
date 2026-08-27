@@ -93,7 +93,7 @@ int main(void)
   /* USER CODE BEGIN 2 */
   Motor_Init();
   D03_RS485_Init();
-  /* 上电保持 1500us 中位，不再自检打油门，避免 485 丢帧时一直停在 1700us */
+  /* 上电不打中位：无 PWM 脉宽，等 RS485 速度帧再动 */
   /* USER CODE END 2 */
 
   /* Infinite loop */

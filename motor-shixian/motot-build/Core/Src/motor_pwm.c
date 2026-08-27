@@ -66,8 +66,9 @@ void Motor_Init(void)
     last_left = 0;
     last_right = 0;
     motor_en(1);
-    tim_force_servo(TIM14, PULSE_MID_US, 0);
-    tim_force_servo(TIM16, PULSE_MID_US, 1);
+    /* 上电不输出 1500us 中位，避免舵机通电自行回中；CCR=0 无脉宽，等首条速度指令 */
+    tim_force_servo(TIM14, 0U, 0);
+    tim_force_servo(TIM16, 0U, 1);
 }
 
 void Motor_SetSpeed(int16_t left, int16_t right)
