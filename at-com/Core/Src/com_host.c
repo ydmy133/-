@@ -2,10 +2,8 @@
 #include "com_proto.h"
 #include "usart.h"
 
-#include <stdio.h>
-
-#define RX_RING_SIZE 256U
-/* 0：单帧 speed 后保持角度，不超时急停。改回 1 即恢复 300ms 掉线保护。 */
+#define RX_RING_SIZE 512U
+/* 0：单帧后保持最后速度，不超时急停。改回 1 即恢复 3000ms 断连保护。 */
 #ifndef COM_CMD_TIMEOUT_EN
 #define COM_CMD_TIMEOUT_EN 0
 #endif
@@ -23,6 +21,15 @@ static ComWatchdog watchdog;
 static ComDedup dedup;
 static int16_t cmd_T;
 static int16_t cmd_Y;
+static uint8_t cmd_dc_prot;
+static uint32_t last_telem_ms;
+
+#define TELEM_PERIOD_MS 1000U
+/* 协议第 3 节：无 GPS/IMU/电压时按默认值 1Hz 上报，供云端/上位机维持链路 */
+static const char kTelemJson[] =
+    "{\"data_valid\":0,\"nav_reached\":0,\"heading\":0,"
+    "\"roll\":0.0,\"pitch\":0.0,\"battery_level\":0.0,"
+    "\"dev_lat\":0.0,\"dev_lon\":0.0,\"speed\":0.0,\"altitude\":0.0}\r\n";
 
 /* RS485 总线空闲→驱动的第一个起始沿最易失真（表现为 D03 侧首字节
  * 畸变成 D5/EA/FA）。帧前垫 2 字节 0x00 让收发器先把总线驱动稳；
@@ -60,10 +67,15 @@ static void uart4_puts(const char *s)
     if (__HAL_UART_GET_FLAG(&huart4, UART_FLAG_TXE) != RESET) {
       huart4.Instance->DR = (uint8_t)*s++;
     }
-    if ((HAL_GetTick() - t0) > 30U) {
+    if ((HAL_GetTick() - t0) > 80U) {
       break;
     }
   }
+}
+
+static void send_telem(void)
+{
+  uart4_puts(kTelemJson);
 }
 
 static void send_estop(void)
@@ -90,82 +102,43 @@ static void send_speed(int16_t left, int16_t right)
   uart2_write(f, (uint16_t)sizeof(f));
 }
 
-static void uart4_putln(const char *s)
-{
-  char line[96];
-  size_t n = 0U;
+/* 非法/导航指令不下发，也不回非协议 JSON，避免云端把应答当遥测解析失败 */
 
-  while (s[n] != '\0' && n < (sizeof(line) - 3U)) {
-    line[n] = s[n];
-    n++;
-  }
-  line[n] = '\r';
-  line[n + 1U] = '\n';
-  line[n + 2U] = '\0';
-  uart4_puts(line);
-}
-
-/* 解析失败回 NACK，让 MQTTX/串口侧能看到指令被拒，而不是静默丢弃 */
-static void send_err(int code)
-{
-  const char *why;
-
-  switch (code) {
-    case COM_ERR_MODE:
-      why = "ERR MODE (stop|speed)";
-      break;
-    case COM_ERR_MISSING:
-      why = "ERR MISSING (mode/T)";
-      break;
-    case COM_ERR_RANGE:
-      why = "ERR RANGE (T,Y in -100..100)";
-      break;
-    default:
-      why = "ERR SYNTAX";
-      break;
-  }
-  uart4_putln(why);
-}
+static uint8_t speed_resend;
+static int16_t speed_resend_l;
+static int16_t speed_resend_r;
+static uint32_t speed_resend_at;
+#define SPEED_RESEND_MS 80U
 
 static void apply_cmd(const ComCmd *cmd, uint32_t now)
 {
   int16_t left = 0;
   int16_t right = 0;
-  char ack[80];
   int send;
-  const char *tag;
 
   cmd_T = cmd->t;
   cmd_Y = cmd->y;
+  cmd_dc_prot = cmd->dc_prot;
   ComWatchdog_OnValidCmd(&watchdog, now);
 
   send = ComDedup_ShouldSend(&dedup, cmd, now);
 
   if (cmd->is_stop != 0U) {
-    /* 只有显式 stop 走急停帧；speed 模式 T=0 改发速度帧 (0,0)，
-     * 避免 D03 侧急停锁窗把紧跟速度帧的停车指令吞掉。 */
+    speed_resend = 0U;
     send_estop();
-    tag = "STOP";
   } else {
     left = Com_MixLeft(cmd_T, cmd_Y);
     right = Com_MixRight(cmd_T, cmd_Y);
     if (send != 0) {
       send_speed(left, right);
-      tag = "OK";
-    } else {
-      tag = "OK DUP";
+      /* RS485 换向噪声可能在速度帧后拼出假急停，把定位舵机打回中位（看起来像反转）。
+       * 80ms 后再补发同一速度，覆盖这段噪声。 */
+      speed_resend = 1U;
+      speed_resend_l = left;
+      speed_resend_r = right;
+      speed_resend_at = now;
     }
   }
-
-  (void)snprintf(ack, sizeof(ack),
-#if COM_CMD_TIMEOUT_EN
-                 "%s T=%d Y=%d L=%d R=%d t=%lu",
-#else
-                 "%s HOLD T=%d Y=%d L=%d R=%d t=%lu",
-#endif
-                 tag, (int)cmd_T, (int)cmd_Y, (int)left, (int)right,
-                 (unsigned long)now);
-  uart4_putln(ack);
 }
 
 void ComHost_Uart4Irq(void)
@@ -202,6 +175,7 @@ void ComHost_Init(void)
 {
   cmd_T = 0;
   cmd_Y = 0;
+  cmd_dc_prot = 1U;
   rx_w = 0U;
   rx_r = 0U;
   rx_err = 0U;
@@ -218,11 +192,9 @@ void ComHost_Init(void)
   ATOMIC_SET_BIT(huart4.Instance->CR1, USART_CR1_RXNEIE | USART_CR1_UE);
   huart4.RxState = HAL_UART_STATE_READY;
   huart4.ErrorCode = HAL_UART_ERROR_NONE;
-#if COM_CMD_TIMEOUT_EN
-  uart4_puts("READY\r\n");
-#else
-  uart4_puts("READY HOLD\r\n");
-#endif
+  speed_resend = 0U;
+  last_telem_ms = HAL_GetTick();
+  send_telem();
 }
 
 void ComHost_Poll(void)
@@ -245,17 +217,27 @@ void ComHost_Poll(void)
     if (fr == 1) {
       ComCmd cmd;
       int rc = ComJson_Parse((const char *)framer.buf, &cmd);
-      if (rc == 0) {
+      if (rc == 0 && cmd.nav_unsupported == 0U) {
         apply_cmd(&cmd, HAL_GetTick());
-      } else {
-        send_err(rc);
       }
       ComJsonFramer_Reset(&framer);
     }
   }
 
-#if COM_CMD_TIMEOUT_EN
   {
+    uint32_t now = HAL_GetTick();
+    if (speed_resend != 0U && (now - speed_resend_at) >= SPEED_RESEND_MS) {
+      send_speed(speed_resend_l, speed_resend_r);
+      speed_resend = 0U;
+    }
+    if ((now - last_telem_ms) >= TELEM_PERIOD_MS) {
+      last_telem_ms = now;
+      send_telem();
+    }
+  }
+
+#if COM_CMD_TIMEOUT_EN
+  if (cmd_dc_prot != 0U) {
     uint32_t now = HAL_GetTick();
     if (ComWatchdog_Poll(&watchdog, now) != 0) {
       cmd_T = 0;

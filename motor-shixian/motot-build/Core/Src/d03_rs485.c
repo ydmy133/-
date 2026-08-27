@@ -20,10 +20,9 @@
 #define CMD_HEARTBEAT   0x00
 #define CMD_SET_SPEED   0x01
 #define CMD_ESTOP       0x02
-/* 速度帧后的 RS485 换向噪声可能拼出假急停，把舵机打回中位。
- * 真换向噪声紧贴速度帧尾（<20ms），压到 20ms 只拦噪声不拦真停车；
- * 500ms 旧值曾把速度帧后 0.5s 内的真实 stop 全部吞掉。 */
-#define ESTOP_LOCKOUT_MS 20U
+/* 速度帧后的 RS485 换向噪声可能拼出假急停，把舵机打回中位（先正转再反转）。
+ * 真换向噪声紧贴速度帧尾；加长到 250ms 拦噪声，仍允许之后的真停车。 */
+#define ESTOP_LOCKOUT_MS 250U
 
 extern UART_HandleTypeDef huart2;
 

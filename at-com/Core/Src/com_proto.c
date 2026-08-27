@@ -155,6 +155,45 @@ static int parse_quoted_strict(const char **pp, char *out, uint32_t out_sz)
   return 0;
 }
 
+static int skip_json_frac_exp(const char **pp)
+{
+  const char *p = *pp;
+  uint32_t digits = 0U;
+
+  if (*p == '.') {
+    p++;
+    if (*p < '0' || *p > '9') {
+      return -1;
+    }
+    while (*p >= '0' && *p <= '9') {
+      digits++;
+      if (digits > 16U) {
+        return -1;
+      }
+      p++;
+    }
+  }
+  if (*p == 'e' || *p == 'E') {
+    p++;
+    if (*p == '+' || *p == '-') {
+      p++;
+    }
+    if (*p < '0' || *p > '9') {
+      return -1;
+    }
+    digits = 0U;
+    while (*p >= '0' && *p <= '9') {
+      digits++;
+      if (digits > 4U) {
+        return -1;
+      }
+      p++;
+    }
+  }
+  *pp = p;
+  return 0;
+}
+
 static int skip_json_number(const char **pp)
 {
   const char *p = *pp;
@@ -182,7 +221,7 @@ static int skip_json_number(const char **pp)
       p++;
     }
   }
-  if (*p == '.' || *p == 'e' || *p == 'E') {
+  if (skip_json_frac_exp(&p) != 0) {
     return -1;
   }
   *pp = p;
@@ -301,6 +340,33 @@ static int parse_pct_field(const char **pp, int32_t *out)
   return 0;
 }
 
+static int parse_dc_prot_field(const char **pp, int32_t *out)
+{
+  int rc = parse_json_i32(pp, out);
+  if (rc != 0) {
+    return COM_ERR_SYNTAX;
+  }
+  if (*out != 0 && *out != 1) {
+    return COM_ERR_RANGE;
+  }
+  return 0;
+}
+
+static void finish_drive_cmd(ComCmd *out, int32_t t_pct, int32_t y_pct,
+                             uint8_t y_omitted, uint8_t dc_prot)
+{
+  out->t = (int16_t)(t_pct * 10);
+  out->y = (int16_t)(y_pct * 10);
+  out->y_omitted = y_omitted;
+  out->dc_prot = dc_prot;
+  out->nav_unsupported = 0U;
+  if (out->t == 0 && out->y == 0) {
+    out->is_stop = 1U;
+  } else {
+    out->is_stop = 0U;
+  }
+}
+
 int ComJson_Parse(const char *js, ComCmd *out)
 {
   const char *p;
@@ -308,9 +374,12 @@ int ComJson_Parse(const char *js, ComCmd *out)
   char mode[16];
   int32_t t_pct = 0;
   int32_t y_pct = 0;
-  uint8_t seen_mode = 0U;
+  int32_t dc_prot = 1;
+  uint8_t seen_legacy = 0U;
+  uint8_t seen_control = 0U;
   uint8_t seen_t = 0U;
   uint8_t seen_y = 0U;
+  uint8_t seen_dc = 0U;
   uint8_t first = 1U;
 
   if (js == NULL || out == NULL) {
@@ -323,6 +392,8 @@ int ComJson_Parse(const char *js, ComCmd *out)
     return COM_ERR_SYNTAX;
   }
   p++;
+
+  mode[0] = '\0';
 
   for (;;) {
     skip_ws(&p);
@@ -353,14 +424,22 @@ int ComJson_Parse(const char *js, ComCmd *out)
     skip_ws(&p);
 
     if (strcmp(key, "mode") == 0) {
-      if (seen_mode != 0U) {
+      if (seen_legacy != 0U || seen_control != 0U) {
         return COM_ERR_SYNTAX;
       }
       if (parse_quoted_strict(&p, mode, (uint32_t)sizeof(mode)) != 0) {
         return COM_ERR_SYNTAX;
       }
-      seen_mode = 1U;
-    } else if (strcmp(key, "T") == 0) {
+      seen_legacy = 1U;
+    } else if (strcmp(key, "control_mode") == 0) {
+      if (seen_legacy != 0U || seen_control != 0U) {
+        return COM_ERR_SYNTAX;
+      }
+      if (parse_quoted_strict(&p, mode, (uint32_t)sizeof(mode)) != 0) {
+        return COM_ERR_SYNTAX;
+      }
+      seen_control = 1U;
+    } else if (strcmp(key, "T") == 0 || strcmp(key, "move_speed") == 0) {
       int rc;
       if (seen_t != 0U) {
         return COM_ERR_SYNTAX;
@@ -370,7 +449,7 @@ int ComJson_Parse(const char *js, ComCmd *out)
         return rc;
       }
       seen_t = 1U;
-    } else if (strcmp(key, "Y") == 0) {
+    } else if (strcmp(key, "Y") == 0 || strcmp(key, "steer_speed") == 0) {
       int rc;
       if (seen_y != 0U) {
         return COM_ERR_SYNTAX;
@@ -380,6 +459,16 @@ int ComJson_Parse(const char *js, ComCmd *out)
         return rc;
       }
       seen_y = 1U;
+    } else if (strcmp(key, "dc_prot") == 0) {
+      int rc;
+      if (seen_dc != 0U) {
+        return COM_ERR_SYNTAX;
+      }
+      rc = parse_dc_prot_field(&p, &dc_prot);
+      if (rc != 0) {
+        return rc;
+      }
+      seen_dc = 1U;
     } else {
       if (skip_json_value(&p) != 0) {
         return COM_ERR_SYNTAX;
@@ -391,33 +480,61 @@ int ComJson_Parse(const char *js, ComCmd *out)
   if (*p != '\0') {
     return COM_ERR_SYNTAX;
   }
-  if (seen_mode == 0U) {
+  if (seen_legacy == 0U && seen_control == 0U) {
     return COM_ERR_MISSING;
   }
 
   memset(out, 0, sizeof(*out));
+  out->dc_prot = (uint8_t)dc_prot;
 
-  if (strcmp(mode, "stop") == 0) {
-    out->t = 0;
-    out->y = 0;
-    out->is_stop = 1U;
-    out->y_omitted = 0U;
+  if (seen_legacy != 0U) {
+    if (strcmp(mode, "stop") == 0) {
+      out->t = 0;
+      out->y = 0;
+      out->is_stop = 1U;
+      out->y_omitted = 0U;
+      out->nav_unsupported = 0U;
+      return 0;
+    }
+    if (strcmp(mode, "speed") != 0) {
+      return COM_ERR_MODE;
+    }
+    if (seen_t == 0U) {
+      return COM_ERR_MISSING;
+    }
+    if (seen_y == 0U) {
+      y_pct = 0;
+    }
+    finish_drive_cmd(out, t_pct, y_pct, (seen_y == 0U) ? 1U : 0U,
+                     (uint8_t)dc_prot);
     return 0;
   }
-  if (strcmp(mode, "speed") != 0) {
-    return COM_ERR_MODE;
+
+  /* 新协议 control_mode */
+  if (strcmp(mode, "navigate") == 0 ||
+      strcmp(mode, "stable_anchor") == 0 ||
+      strcmp(mode, "fixed_point") == 0) {
+    out->nav_unsupported = 1U;
+    out->is_stop = 0U;
+    return 0;
   }
-  if (seen_t == 0U) {
-    return COM_ERR_MISSING;
+
+  if (strcmp(mode, "manual") == 0) {
+    if (seen_y == 0U) {
+      y_pct = 0;
+    }
+    finish_drive_cmd(out, t_pct, y_pct, (seen_y == 0U) ? 1U : 0U,
+                     (uint8_t)dc_prot);
+    return 0;
   }
-  out->is_stop = 0U;
-  out->y_omitted = (seen_y == 0U) ? 1U : 0U;
-  if (seen_y == 0U) {
-    y_pct = 0;
+
+  if (strcmp(mode, "cruise_speed") == 0 || strcmp(mode, "cruise_dir") == 0) {
+    /* 无 IMU：巡航退化为按 move_speed 直行 */
+    finish_drive_cmd(out, t_pct, 0, 1U, (uint8_t)dc_prot);
+    return 0;
   }
-  out->t = (int16_t)(t_pct * 10);
-  out->y = (int16_t)(y_pct * 10);
-  return 0;
+
+  return COM_ERR_MODE;
 }
 
 void ComWatchdog_Init(ComWatchdog *w, uint32_t now_ms)

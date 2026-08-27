@@ -9,7 +9,7 @@ extern "C" {
 #endif
 
 #ifndef CMD_TIMEOUT_MS
-#define CMD_TIMEOUT_MS 300U
+#define CMD_TIMEOUT_MS 3000U
 #endif
 
 /* 同值 speed 指令去重窗口：窗口内重复到达的副本不再下发。
@@ -19,7 +19,7 @@ extern "C" {
 #define COM_DEDUP_MS 200U
 #endif
 
-#define JSON_LINE_SIZE 192U
+#define JSON_LINE_SIZE 384U
 #define COM_PCT_MIN (-100)
 #define COM_PCT_MAX 100
 #define COM_SPEED_MAX 1000
@@ -36,10 +36,12 @@ extern "C" {
  */
 
 typedef struct {
-  int16_t t;      /* 电机单位 = 网页百分比 * 10，范围 [-1000, 1000] */
+  int16_t t;      /* 电机单位 = 百分比 * 10，范围 [-1000, 1000] */
   int16_t y;
   uint8_t is_stop;
-  uint8_t y_omitted; /* speed 且未给 Y 时为 1，Y 按 0 处理 */
+  uint8_t y_omitted; /* 未给 steer_speed/Y 时为 1，Y 按 0 处理 */
+  uint8_t dc_prot;   /* 1=3s 断连急停，0=保持最后速度；缺省 1 */
+  uint8_t nav_unsupported; /* navigate/stable_anchor/fixed_point：解析成功但不执行 */
 } ComCmd;
 
 typedef struct {
@@ -67,9 +69,10 @@ typedef struct {
 
 /* ComJson_Parse 失败码（负数，0 成功） */
 #define COM_ERR_SYNTAX (-1)  /* JSON 结构/字符非法 */
-#define COM_ERR_MODE    (-2) /* mode 不是 stop/speed */
-#define COM_ERR_MISSING (-3) /* 缺 mode 或 speed 缺 T */
-#define COM_ERR_RANGE   (-4) /* T/Y 超出 [-100,100] */
+#define COM_ERR_MODE    (-2) /* control_mode/mode 无法识别 */
+#define COM_ERR_MISSING (-3) /* 缺 control_mode/mode，或旧 speed 缺 T */
+#define COM_ERR_RANGE   (-4) /* 速度超出 [-100,100] 或 dc_prot 非 0/1 */
+#define COM_ERR_NAV     (-5) /* 导航类模式：主机拒绝下发（非解析失败） */
 
 void ComJsonFramer_Reset(ComJsonFramer *f);
 /* 1=得到完整顶层对象（在 f->buf），0=继续，-1=丢弃并已复位 */
