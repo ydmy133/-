@@ -64,12 +64,18 @@ static void test_parse_valid(void)
 static void test_parse_invalid(void)
 {
   ComCmd cmd;
+  int rc;
 
-  expect(ComJson_Parse("{\"mode\":\"speed\",\"T\":150,\"Y\":0}", &cmd) != 0, "T=150");
-  expect(ComJson_Parse("{\"mode\":\"speed\",\"T\":-150,\"Y\":0}", &cmd) != 0, "T=-150");
-  expect(ComJson_Parse("{\"mode\":\"speed\",\"T\":100,\"Y\":101}", &cmd) != 0, "Y=101");
-  expect(ComJson_Parse("{\"mode\":\"speed\",\"Y\":20}", &cmd) != 0, "missing T");
-  expect(ComJson_Parse("{\"mode\":\"sped\",\"T\":1,\"Y\":0}", &cmd) != 0, "illegal mode");
+  rc = ComJson_Parse("{\"mode\":\"speed\",\"T\":150,\"Y\":0}", &cmd);
+  expect(rc == COM_ERR_RANGE, "T=150 range code");
+  rc = ComJson_Parse("{\"mode\":\"speed\",\"T\":-150,\"Y\":0}", &cmd);
+  expect(rc == COM_ERR_RANGE, "T=-150 range code");
+  rc = ComJson_Parse("{\"mode\":\"speed\",\"T\":100,\"Y\":101}", &cmd);
+  expect(rc == COM_ERR_RANGE, "Y=101 range code");
+  rc = ComJson_Parse("{\"mode\":\"speed\",\"Y\":20}", &cmd);
+  expect(rc == COM_ERR_MISSING, "missing T code");
+  rc = ComJson_Parse("{\"mode\":\"sped\",\"T\":1,\"Y\":0}", &cmd);
+  expect(rc == COM_ERR_MODE, "illegal mode code");
   expect(ComJson_Parse("{\"mode\":\"stopplus\"}", &cmd) != 0, "stop prefix");
   expect(ComJson_Parse("{\"mode\":\"speed\",\"T\":2147483647}", &cmd) != 0, "huge T");
   expect(ComJson_Parse("{\"mode\":\"speed\",\"T\":999999999999}", &cmd) != 0, "overlong digits");
@@ -83,6 +89,8 @@ static void test_parse_invalid(void)
   expect(ComJson_Parse("not-json", &cmd) != 0, "not json");
   expect(ComJson_Parse("{}", &cmd) != 0, "empty object");
   expect(ComJson_Parse("{\"mode\":\"speed\",\"T\":50,\"T\":1}", &cmd) != 0, "dup T");
+  rc = ComJson_Parse("{\"mode\":1}", &cmd);
+  expect(rc == COM_ERR_SYNTAX, "mode not string code");
 }
 
 static void test_framer(void)
@@ -168,6 +176,44 @@ static void test_watchdog(void)
   expect(ComWatchdog_Poll(&w, 2000) == 0, "same tick no timeout");
 }
 
+static void test_dedup(void)
+{
+  ComDedup d;
+  ComCmd cmd;
+
+  ComDedup_Init(&d);
+
+  /* 首条必发 */
+  memset(&cmd, 0, sizeof(cmd));
+  cmd.t = 100;
+  cmd.y = 0;
+  expect(ComDedup_ShouldSend(&d, &cmd, 1000) == 1, "first speed sent");
+
+  /* 窗口内同值副本拦截（QoS 重传场景） */
+  expect(ComDedup_ShouldSend(&d, &cmd, 1050) == 0, "dup within window");
+  expect(ComDedup_ShouldSend(&d, &cmd, 1100) == 0, "dup at window edge");
+  /* 窗口外同值放行（100ms 周期重发的合法场景） */
+  expect(ComDedup_ShouldSend(&d, &cmd, 1201) == 1, "same value after window");
+
+  /* 值变了立即放行 */
+  cmd.t = -100;
+  expect(ComDedup_ShouldSend(&d, &cmd, 1210) == 1, "changed value sent");
+  cmd.t = 100;
+  expect(ComDedup_ShouldSend(&d, &cmd, 1215) == 1, "value back sent");
+
+  /* 急停永不去重 */
+  memset(&cmd, 0, sizeof(cmd));
+  cmd.is_stop = 1U;
+  expect(ComDedup_ShouldSend(&d, &cmd, 1220) == 1, "estop 1 sent");
+  expect(ComDedup_ShouldSend(&d, &cmd, 1221) == 1, "estop 2 sent");
+  expect(ComDedup_ShouldSend(&d, &cmd, 1222) == 1, "estop 3 sent");
+
+  /* 急停后的 speed (0,0)：值不同（last_stop=1）必须放行 */
+  memset(&cmd, 0, sizeof(cmd));
+  expect(ComDedup_ShouldSend(&d, &cmd, 1230) == 1, "speed 0 after stop sent");
+  expect(ComDedup_ShouldSend(&d, &cmd, 1231) == 0, "speed 0 dup blocked");
+}
+
 static void test_d03(void)
 {
   uint8_t f[D03_SPEED_FRAME_LEN];
@@ -204,6 +250,7 @@ int main(void)
   test_parse_invalid();
   test_framer();
   test_watchdog();
+  test_dedup();
   test_d03();
   if (g_fail != 0) {
     printf("%d failed\n", g_fail);

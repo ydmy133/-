@@ -12,6 +12,13 @@ extern "C" {
 #define CMD_TIMEOUT_MS 300U
 #endif
 
+/* 同值 speed 指令去重窗口：窗口内重复到达的副本不再下发。
+ * 覆盖 QoS 重传 / 模块缓存重发的典型间隔，又不至于长时间屏蔽掉
+ * 首帧被线路损坏后本应救场的重发副本。 */
+#ifndef COM_DEDUP_MS
+#define COM_DEDUP_MS 200U
+#endif
+
 #define JSON_LINE_SIZE 192U
 #define COM_PCT_MIN (-100)
 #define COM_PCT_MAX 100
@@ -49,6 +56,21 @@ typedef struct {
   uint8_t timed_out;
 } ComWatchdog;
 
+/* 下游去重闸门：拦截上游重复投递的同一指令 */
+typedef struct {
+  int16_t last_t;
+  int16_t last_y;
+  uint8_t last_stop;
+  uint32_t last_sent_ms;
+  uint8_t armed; /* 收到过至少一条指令后为 1 */
+} ComDedup;
+
+/* ComJson_Parse 失败码（负数，0 成功） */
+#define COM_ERR_SYNTAX (-1)  /* JSON 结构/字符非法 */
+#define COM_ERR_MODE    (-2) /* mode 不是 stop/speed */
+#define COM_ERR_MISSING (-3) /* 缺 mode 或 speed 缺 T */
+#define COM_ERR_RANGE   (-4) /* T/Y 超出 [-100,100] */
+
 void ComJsonFramer_Reset(ComJsonFramer *f);
 /* 1=得到完整顶层对象（在 f->buf），0=继续，-1=丢弃并已复位 */
 int ComJsonFramer_Feed(ComJsonFramer *f, uint8_t b);
@@ -59,6 +81,12 @@ void ComWatchdog_Init(ComWatchdog *w, uint32_t now_ms);
 void ComWatchdog_OnValidCmd(ComWatchdog *w, uint32_t now_ms);
 /* 1=调用方应立即停车（边沿或周期性补发急停），0=无需动作 */
 int ComWatchdog_Poll(ComWatchdog *w, uint32_t now_ms);
+
+void ComDedup_Init(ComDedup *d);
+/* 1=应下发（并已记录），0=窗口内重复副本应丢弃。
+ * 急停永不去重：安全指令必须每条都到总线。 */
+
+int ComDedup_ShouldSend(ComDedup *d, const ComCmd *cmd, uint32_t now_ms);
 
 int16_t Com_ClampSpeed(int32_t v);
 int16_t Com_MixLeft(int16_t t, int16_t y);

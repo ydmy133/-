@@ -291,11 +291,12 @@ static int parse_json_i32(const char **pp, int32_t *out)
 
 static int parse_pct_field(const char **pp, int32_t *out)
 {
-  if (parse_json_i32(pp, out) != 0) {
-    return -1;
+  int rc = parse_json_i32(pp, out);
+  if (rc != 0) {
+    return COM_ERR_SYNTAX;
   }
   if (*out < COM_PCT_MIN || *out > COM_PCT_MAX) {
-    return -1;
+    return COM_ERR_RANGE;
   }
   return 0;
 }
@@ -313,13 +314,13 @@ int ComJson_Parse(const char *js, ComCmd *out)
   uint8_t first = 1U;
 
   if (js == NULL || out == NULL) {
-    return -1;
+    return COM_ERR_SYNTAX;
   }
 
   p = js;
   skip_ws(&p);
   if (*p != '{') {
-    return -1;
+    return COM_ERR_SYNTAX;
   }
   p++;
 
@@ -331,63 +332,67 @@ int ComJson_Parse(const char *js, ComCmd *out)
     }
     if (first == 0U) {
       if (*p != ',') {
-        return -1;
+        return COM_ERR_SYNTAX;
       }
       p++;
       skip_ws(&p);
       if (*p == '}') {
-        return -1; /* 尾逗号 */
+        return COM_ERR_SYNTAX; /* 尾逗号 */
       }
     }
     first = 0U;
 
     if (parse_quoted_strict(&p, key, (uint32_t)sizeof(key)) != 0) {
-      return -1;
+      return COM_ERR_SYNTAX;
     }
     skip_ws(&p);
     if (*p != ':') {
-      return -1;
+      return COM_ERR_SYNTAX;
     }
     p++;
     skip_ws(&p);
 
     if (strcmp(key, "mode") == 0) {
       if (seen_mode != 0U) {
-        return -1;
+        return COM_ERR_SYNTAX;
       }
       if (parse_quoted_strict(&p, mode, (uint32_t)sizeof(mode)) != 0) {
-        return -1;
+        return COM_ERR_SYNTAX;
       }
       seen_mode = 1U;
     } else if (strcmp(key, "T") == 0) {
+      int rc;
       if (seen_t != 0U) {
-        return -1;
+        return COM_ERR_SYNTAX;
       }
-      if (parse_pct_field(&p, &t_pct) != 0) {
-        return -1;
+      rc = parse_pct_field(&p, &t_pct);
+      if (rc != 0) {
+        return rc;
       }
       seen_t = 1U;
     } else if (strcmp(key, "Y") == 0) {
+      int rc;
       if (seen_y != 0U) {
-        return -1;
+        return COM_ERR_SYNTAX;
       }
-      if (parse_pct_field(&p, &y_pct) != 0) {
-        return -1;
+      rc = parse_pct_field(&p, &y_pct);
+      if (rc != 0) {
+        return rc;
       }
       seen_y = 1U;
     } else {
       if (skip_json_value(&p) != 0) {
-        return -1;
+        return COM_ERR_SYNTAX;
       }
     }
   }
 
   skip_ws(&p);
   if (*p != '\0') {
-    return -1;
+    return COM_ERR_SYNTAX;
   }
   if (seen_mode == 0U) {
-    return -1;
+    return COM_ERR_MISSING;
   }
 
   memset(out, 0, sizeof(*out));
@@ -400,10 +405,10 @@ int ComJson_Parse(const char *js, ComCmd *out)
     return 0;
   }
   if (strcmp(mode, "speed") != 0) {
-    return -1;
+    return COM_ERR_MODE;
   }
   if (seen_t == 0U) {
-    return -1;
+    return COM_ERR_MISSING;
   }
   out->is_stop = 0U;
   out->y_omitted = (seen_y == 0U) ? 1U : 0U;
@@ -449,6 +454,48 @@ int ComWatchdog_Poll(ComWatchdog *w, uint32_t now_ms)
     return 1;
   }
   return 0;
+}
+
+void ComDedup_Init(ComDedup *d)
+{
+  if (d == NULL) {
+    return;
+  }
+  d->last_t = 0;
+  d->last_y = 0;
+  d->last_stop = 0U;
+  d->last_sent_ms = 0U;
+  d->armed = 0U;
+}
+
+int ComDedup_ShouldSend(ComDedup *d, const ComCmd *cmd, uint32_t now_ms)
+{
+  if (d == NULL || cmd == NULL) {
+    return 1;
+  }
+
+  /* 急停永不去重 */
+  if (cmd->is_stop != 0U) {
+    d->last_t = 0;
+    d->last_y = 0;
+    d->last_stop = 1U;
+    d->last_sent_ms = now_ms;
+    d->armed = 1U;
+    return 1;
+  }
+
+  if (d->armed != 0U && d->last_stop == 0U &&
+      d->last_t == cmd->t && d->last_y == cmd->y &&
+      (now_ms - d->last_sent_ms) < COM_DEDUP_MS) {
+    return 0;
+  }
+
+  d->last_t = cmd->t;
+  d->last_y = cmd->y;
+  d->last_stop = 0U;
+  d->last_sent_ms = now_ms;
+  d->armed = 1U;
+  return 1;
 }
 
 int16_t Com_ClampSpeed(int32_t v)

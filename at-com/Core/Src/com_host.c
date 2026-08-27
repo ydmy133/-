@@ -20,8 +20,15 @@ static volatile uint8_t rx_err;
 
 static ComJsonFramer framer;
 static ComWatchdog watchdog;
+static ComDedup dedup;
 static int16_t cmd_T;
 static int16_t cmd_Y;
+
+/* RS485 总线空闲→驱动的第一个起始沿最易失真（表现为 D03 侧首字节
+ * 畸变成 D5/EA/FA）。帧前垫 2 字节 0x00 让收发器先把总线驱动稳；
+ * D03 的滑窗解析器会把 0x00 当垃圾前缀滑过，两端无需协商。 */
+#define RS485_PREAMBLE_LEN 2U
+static const uint8_t rs485_preamble[RS485_PREAMBLE_LEN] = {0x00U, 0x00U};
 
 static void uart2_write(const uint8_t *p, uint16_t n)
 {
@@ -61,46 +68,104 @@ static void uart4_puts(const char *s)
 
 static void send_estop(void)
 {
-  uint8_t f[D03_ESTOP_FRAME_LEN];
-  D03_BuildEstop(f);
-  uart2_write(f, (uint16_t)D03_ESTOP_FRAME_LEN);
+  uint8_t f[RS485_PREAMBLE_LEN + D03_ESTOP_FRAME_LEN];
+  uint8_t i;
+
+  for (i = 0U; i < RS485_PREAMBLE_LEN; i++) {
+    f[i] = rs485_preamble[i];
+  }
+  D03_BuildEstop(&f[RS485_PREAMBLE_LEN]);
+  uart2_write(f, (uint16_t)sizeof(f));
 }
 
 static void send_speed(int16_t left, int16_t right)
 {
-  uint8_t f[D03_SPEED_FRAME_LEN];
-  D03_BuildSpeed(f, left, right);
-  uart2_write(f, (uint16_t)D03_SPEED_FRAME_LEN);
+  uint8_t f[RS485_PREAMBLE_LEN + D03_SPEED_FRAME_LEN];
+  uint8_t i;
+
+  for (i = 0U; i < RS485_PREAMBLE_LEN; i++) {
+    f[i] = rs485_preamble[i];
+  }
+  D03_BuildSpeed(&f[RS485_PREAMBLE_LEN], left, right);
+  uart2_write(f, (uint16_t)sizeof(f));
+}
+
+static void uart4_putln(const char *s)
+{
+  char line[96];
+  size_t n = 0U;
+
+  while (s[n] != '\0' && n < (sizeof(line) - 3U)) {
+    line[n] = s[n];
+    n++;
+  }
+  line[n] = '\r';
+  line[n + 1U] = '\n';
+  line[n + 2U] = '\0';
+  uart4_puts(line);
+}
+
+/* 解析失败回 NACK，让 MQTTX/串口侧能看到指令被拒，而不是静默丢弃 */
+static void send_err(int code)
+{
+  const char *why;
+
+  switch (code) {
+    case COM_ERR_MODE:
+      why = "ERR MODE (stop|speed)";
+      break;
+    case COM_ERR_MISSING:
+      why = "ERR MISSING (mode/T)";
+      break;
+    case COM_ERR_RANGE:
+      why = "ERR RANGE (T,Y in -100..100)";
+      break;
+    default:
+      why = "ERR SYNTAX";
+      break;
+  }
+  uart4_putln(why);
 }
 
 static void apply_cmd(const ComCmd *cmd, uint32_t now)
 {
-  int16_t left;
-  int16_t right;
-  char ack[64];
+  int16_t left = 0;
+  int16_t right = 0;
+  char ack[80];
+  int send;
+  const char *tag;
 
   cmd_T = cmd->t;
   cmd_Y = cmd->y;
   ComWatchdog_OnValidCmd(&watchdog, now);
 
-  left = Com_MixLeft(cmd_T, cmd_Y);
-  right = Com_MixRight(cmd_T, cmd_Y);
+  send = ComDedup_ShouldSend(&dedup, cmd, now);
 
-  if (cmd->is_stop != 0U || (cmd_T == 0 && cmd_Y == 0)) {
+  if (cmd->is_stop != 0U) {
+    /* 只有显式 stop 走急停帧；speed 模式 T=0 改发速度帧 (0,0)，
+     * 避免 D03 侧急停锁窗把紧跟速度帧的停车指令吞掉。 */
     send_estop();
+    tag = "STOP";
   } else {
-    send_speed(left, right);
+    left = Com_MixLeft(cmd_T, cmd_Y);
+    right = Com_MixRight(cmd_T, cmd_Y);
+    if (send != 0) {
+      send_speed(left, right);
+      tag = "OK";
+    } else {
+      tag = "OK DUP";
+    }
   }
 
   (void)snprintf(ack, sizeof(ack),
 #if COM_CMD_TIMEOUT_EN
-                 "OK T=%d Y=%d L=%d R=%d t=%lu\r\n",
+                 "%s T=%d Y=%d L=%d R=%d t=%lu",
 #else
-                 "OK HOLD T=%d Y=%d L=%d R=%d t=%lu\r\n",
+                 "%s HOLD T=%d Y=%d L=%d R=%d t=%lu",
 #endif
-                 (int)cmd_T, (int)cmd_Y, (int)left, (int)right,
+                 tag, (int)cmd_T, (int)cmd_Y, (int)left, (int)right,
                  (unsigned long)now);
-  uart4_puts(ack);
+  uart4_putln(ack);
 }
 
 void ComHost_Uart4Irq(void)
@@ -142,6 +207,7 @@ void ComHost_Init(void)
   rx_err = 0U;
   ComJsonFramer_Reset(&framer);
   ComWatchdog_Init(&watchdog, HAL_GetTick());
+  ComDedup_Init(&dedup);
 
   (void)huart4.Instance->SR;
   (void)huart4.Instance->DR;
@@ -178,8 +244,11 @@ void ComHost_Poll(void)
     fr = ComJsonFramer_Feed(&framer, b);
     if (fr == 1) {
       ComCmd cmd;
-      if (ComJson_Parse((const char *)framer.buf, &cmd) == 0) {
+      int rc = ComJson_Parse((const char *)framer.buf, &cmd);
+      if (rc == 0) {
         apply_cmd(&cmd, HAL_GetTick());
+      } else {
+        send_err(rc);
       }
       ComJsonFramer_Reset(&framer);
     }

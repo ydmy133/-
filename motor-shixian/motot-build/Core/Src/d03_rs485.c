@@ -20,8 +20,10 @@
 #define CMD_HEARTBEAT   0x00
 #define CMD_SET_SPEED   0x01
 #define CMD_ESTOP       0x02
-/* 速度帧后的 RS485 换向噪声可能拼出假急停，把舵机打回中位。 */
-#define ESTOP_LOCKOUT_MS 500U
+/* 速度帧后的 RS485 换向噪声可能拼出假急停，把舵机打回中位。
+ * 真换向噪声紧贴速度帧尾（<20ms），压到 20ms 只拦噪声不拦真停车；
+ * 500ms 旧值曾把速度帧后 0.5s 内的真实 stop 全部吞掉。 */
+#define ESTOP_LOCKOUT_MS 20U
 
 extern UART_HandleTypeDef huart2;
 
@@ -95,10 +97,13 @@ static void handle_speed_frame(const uint8_t *f, uint8_t total)
         left  = (int16_t)(((uint16_t)f[4] << 8) | f[5]);
         right = (int16_t)(((uint16_t)f[6] << 8) | f[7]);
         last_ok_ms = HAL_GetTick();
-        /* 只跟速度帧走。0,0 忽略：噪声/误同步不要把已到位的角度打回中位 */
+        /* (0,0) 现在也执行：主机 T=0 改发速度帧回中，这是受控停车。
+         * 噪声风险由 XOR 校验 + 帧结构兜底。 */
         if (left != 0 || right != 0) {
           apply_speed(left, right);
           last_nonzero_ms = last_ok_ms;
+        } else {
+          apply_speed(0, 0);
         }
       }
       break;
